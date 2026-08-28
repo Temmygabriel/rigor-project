@@ -55,6 +55,19 @@ export async function getRoundCounter(): Promise<number> {
   }
 }
 
+// FIX (steward feedback, issue 3): exposes the second fair-window gate so the
+// UI can honestly show progress toward it, not just the round count. Wraps
+// the same helper the contract itself enforces in resolve_critique /
+// cancel_unrevealed -- one source of truth, no risk of drifting from what's
+// actually enforced on-chain.
+export async function getDistinctCommittersSince(committedAtRound: number): Promise<number> {
+  try {
+    return Number(await read("get_distinct_committers_since", [committedAtRound]));
+  } catch {
+    return 0;
+  }
+}
+
 export async function getContractBalanceWei(): Promise<bigint> {
   try {
     return BigInt(String(await read("get_contract_balance")));
