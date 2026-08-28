@@ -20,6 +20,9 @@ export type CritiqueStatus =
   | "substantive"
   | "frivolous"
   | "inconclusive"
+  | "duplicate" // FIX (steward feedback, issue 2): new outcome -- correctly
+  // identified a real flaw, but it repeats an already-rewarded critique for
+  // the same paper. Stake returned in full, no reward.
   | "expired";
 
 export interface CritiqueRecord {
@@ -44,6 +47,12 @@ export interface ConfigRecord {
   protocol_fees_collected: string; // wei decimal string
   round_counter: number;
   min_window_rounds: number;
+  // FIX (steward feedback, issue 3): second, independent fair-window gate --
+  // resolution now also requires this many distinct committing addresses
+  // since a critique's own commit round, not just elapsed rounds from any
+  // source. Display both honestly; round count alone is no longer the whole
+  // story.
+  min_distinct_committers: number;
   reward_bps_of_pool: number;
   max_fee_bps: number;
 }
