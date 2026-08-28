@@ -49,14 +49,14 @@ export function shortAddr(a?: string): string {
 
 // Accept either a bare arXiv id (2401.12345, 2401.12345v2, math/0211159) or a
 // pasted arxiv.org / export.arxiv.org URL, and return the bare id. The contract
-// only accepts a bare id (it builds the canonical API URL itself), so we extract
+// only accepts a bare id (it builds the canonical HTML URL itself), so we extract
 // client-side for a friendlier paste-anything input.
 export function extractArxivId(input: string): string | null {
   const s = (input || "").trim();
   if (!s) return null;
   const bare = s.match(/^(\d{4}\.\d{4,5}(v\d+)?|[a-z\-]+\/\d{7}(v\d+)?)$/i);
   if (bare) return s;
-  const m = s.match(/(?:id_list=|abs\/|pdf\/)([^\s&?#]+?)(?:\.pdf)?(?:[?#&]|$)/i);
+  const m = s.match(/(?:id_list=|abs\/|pdf\/|html\/)([^\s&?#]+?)(?:\.pdf)?(?:[?#&]|$)/i);
   return m ? m[1] : null;
 }
 
@@ -99,12 +99,21 @@ export const STATUS_META: Record<
   substantive: {
     label: "Substantive",
     tone: "green",
-    note: "Validator consensus: a real flaw. Stake returned + reward paid.",
+    note: "Validator consensus: a real, original flaw. Stake returned + reward paid.",
   },
   frivolous: {
     label: "Frivolous",
     tone: "red",
     note: "Validator consensus: not substantive. Stake forfeited.",
+  },
+  // FIX (steward feedback, issue 2): new outcome. Distinct from both
+  // "substantive" (this repeats an already-rewarded finding, so no fresh
+  // reward) and "frivolous" (the underlying critique was correct, just not
+  // new -- forfeiting the stake would be punitive for being right).
+  duplicate: {
+    label: "Duplicate",
+    tone: "amber",
+    note: "Validator consensus: repeats an already-rewarded critique for this paper. Stake returned, no reward.",
   },
   inconclusive: {
     label: "Inconclusive",
