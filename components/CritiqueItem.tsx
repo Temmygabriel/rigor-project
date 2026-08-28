@@ -5,17 +5,18 @@ import { useIdentity } from "@/app/providers";
 import type { CritiqueRecord } from "@/lib/types";
 import {
   cancelUnrevealed,
+  getDistinctCommittersSince,
   resolveCritique,
   revealCritique,
 } from "@/lib/contract";
 import { findDraftForCritique } from "@/lib/storage";
-import { MIN_WINDOW_ROUNDS } from "@/lib/config";
+import { MIN_WINDOW_ROUNDS, MIN_DISTINCT_COMMITTERS } from "@/lib/config";
 import { shortAddr, STATUS_META, weiToGen } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { StatusTag } from "./StatusTag";
 import { TxProgress } from "./TxProgress";
 
-const RESOLVED = new Set(["substantive", "frivolous", "inconclusive", "expired"]);
+const RESOLVED = new Set(["substantive", "frivolous", "duplicate", "inconclusive", "expired"]);
 
 export function CritiqueItem({
   critique,
@@ -36,13 +37,36 @@ export function CritiqueItem({
   const [fromDraft, setFromDraft] = useState(false);
   const busy = !!step;
 
+  // FIX (steward feedback, issue 3): the real, enforced number, not a guess --
+  // read straight from the contract's own get_distinct_committers_since, the
+  // same helper resolve_critique/cancel_unrevealed check against internally.
+  const [distinctCommitters, setDistinctCommitters] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    getDistinctCommittersSince(critique.committed_at_round).then((n) => {
+      if (!cancelled) setDistinctCommitters(n);
+    });
+    return () => {
+      cancelled = true;
+    };
+    // Re-check whenever the round counter moves, since that's what changes it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [critique.committed_at_round, roundCounter]);
+
   const isMine =
     !!identity &&
     identity.address.toLowerCase() === critique.hunter.toLowerCase();
 
   const roundsElapsed = Math.max(0, roundCounter - critique.committed_at_round);
-  const windowPassed = roundsElapsed >= MIN_WINDOW_ROUNDS;
+  const roundsPassed = roundsElapsed >= MIN_WINDOW_ROUNDS;
   const roundsLeft = Math.max(0, MIN_WINDOW_ROUNDS - roundsElapsed);
+  const distinctPassed = distinctCommitters !== null && distinctCommitters >= MIN_DISTINCT_COMMITTERS;
+  // Only claim the window has passed once we actually know the distinct count --
+  // showing "resolvable" based on rounds alone would be misleading now that
+  // there's a second real gate.
+  const windowPassed = roundsPassed && distinctPassed;
+
   const meta = STATUS_META[critique.status];
   const isResolved = RESOLVED.has(critique.status);
   const rewardWei = (() => {
@@ -161,7 +185,11 @@ export function CritiqueItem({
 
       {/* Verdict detail after resolution */}
       {isResolved && (
-        <div className={`notice notice-${meta.tone === "green" ? "green" : meta.tone === "red" ? "red" : "blue"}`}>
+        <div
+          className={`notice notice-${
+            meta.tone === "green" ? "green" : meta.tone === "red" ? "red" : "blue"
+          }`}
+        >
           <strong>{meta.label}.</strong> {meta.note}
           {critique.verdict_detail ? ` — ${critique.verdict_detail}` : ""}
           {rewardWei > 0n && (
@@ -273,8 +301,16 @@ export function CritiqueItem({
             </div>
           ) : (
             <div className="hint">
-              Resolvable in {roundsLeft} more commit-round{roundsLeft === 1 ? "" : "s"}. Each new
-              commitment on any paper advances the clock.
+              Resolvable once both conditions are met:{" "}
+              {roundsPassed ? "✓" : `${roundsLeft} more commit-round${roundsLeft === 1 ? "" : "s"}`}
+              {" · "}
+              {distinctCommitters === null
+                ? "checking distinct committers…"
+                : distinctPassed
+                ? "✓ enough distinct committers"
+                : `${distinctCommitters}/${MIN_DISTINCT_COMMITTERS} distinct hunters committed since`}
+              . Each new commitment on any paper advances the clock; only DISTINCT addresses
+              count toward the second condition.
             </div>
           )}
         </div>
