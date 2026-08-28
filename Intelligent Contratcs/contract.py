@@ -7,19 +7,39 @@ import hashlib
 
 # --- Constants ------------------------------------------------------------------
 
-# arXiv's structured Atom/XML API -- reliable across independent validator fetches,
-# unlike the JS-flavored abs/ HTML page. We build this URL from an arXiv id
-# ourselves rather than trusting a caller-supplied URL (keeps every fetch pointed
-# at the real arXiv API and normalizes the endpoint across validators).
-ARXIV_API = "https://export.arxiv.org/api/query?id_list="
+# FIX (steward feedback, issue 1): the old ARXIV_API endpoint
+# (export.arxiv.org/api/query) only ever returns metadata -- title, abstract,
+# authors. It never contained the paper's actual body. Every critique this
+# contract judged was judged against an abstract, not the paper. Fetch arXiv's
+# full-text HTML instead -- server-rendered, not a JS SPA, the same reliable
+# fetch category used successfully elsewhere in this project. Published for
+# most papers submitted since Dec 2023; older papers may not have one, which
+# falls through to the existing evidence-bound `inconclusive` path rather than
+# silently falling back to the abstract (that would just reintroduce the bug).
+ARXIV_HTML_BASE = "https://arxiv.org/html/"
 
 MIN_WINDOW_ROUNDS = 5      # resolve requires round_counter - committed_at_round >= this
+# FIX (steward feedback, issue 3): a second, independent gate alongside
+# MIN_WINDOW_ROUNDS. round_counter alone can be self-advanced cheaply by one
+# address spamming commits. Requiring a minimum number of DISTINCT committing
+# addresses since a critique's own commit round raises the cost of gaming from
+# "spam cheap commits from one address" to "control several distinct funded
+# addresses" -- materially higher, not mathematically airtight. State that
+# honestly rather than implying it's fully solved.
+MIN_DISTINCT_COMMITTERS = 3
+
 REWARD_BPS_OF_POOL = 5000  # a substantive critique earns 50% of the *current* pool
 DEFAULT_FEE_BPS = 250      # 2.5% protocol fee on gross reward (admin-tunable)
 MAX_FEE_BPS = 2000         # hard cap (20%) so the admin can never gut hunter rewards
 BPS_DENOM = 10000
 
-VALID_VERDICTS = ("substantive", "frivolous", "inconclusive")
+# FIX (steward feedback, issue 2): "duplicate" added. A critique that
+# substantively repeats an already-rewarded critique for the same paper is
+# neither wrong (frivolous) nor unjudgeable (inconclusive) -- it's correctly
+# identified but not a fresh finding. Settlement: stake returned in full, no
+# reward. Documented design choice, not an obvious default -- see
+# _apply_verdict.
+VALID_VERDICTS = ("substantive", "frivolous", "inconclusive", "duplicate")
 
 # Error classification prefixes so validators can compare failure paths correctly
 # (see write-contract skill): deterministic errors must match exactly; transient
@@ -48,72 +68,80 @@ def _commit_hash(critique_text: str, salt: str) -> str:
     return hashlib.sha256((critique_text + salt).encode("utf-8")).hexdigest()
 
 
-def _slice_between(text: str, start_tag: str, end_tag: str, from_pos: int = 0) -> str:
-    """Return the text between the first start_tag/end_tag after from_pos, or ""."""
-    i = text.find(start_tag, from_pos)
-    if i == -1:
-        return ""
-    i += len(start_tag)
-    j = text.find(end_tag, i)
-    if j == -1:
-        return ""
-    return text[i:j].strip()
-
-
-def _fetch_paper_text(url: str):
-    """Fetch the arXiv entry and return a trimmed text blob, or None if unreachable.
-    Bare Exception only -- never import GenVM exception classes here, their
-    availability can differ across validators and split consensus. Returning None
-    (not raising) lets the caller apply the evidence-bound `inconclusive` rule."""
-    page_text = None
+def _fetch_paper_text(arxiv_id: str):
+    """FIX (issue 1): fetch full-text HTML (the actual paper body), not the
+    abstract API. Returns None if unreachable; callers apply the evidence-bound
+    inconclusive rule -- no fallback to the abstract. Bare Exception only, never
+    GenVM exception classes (their availability can differ across validators and
+    split consensus)."""
+    full_text = None
     try:
-        res = gl.nondet.web.get(url)
+        res = gl.nondet.web.get(ARXIV_HTML_BASE + arxiv_id)
         if res.status < 400 and res.body is not None:
-            page_text = res.body.decode("utf-8", errors="ignore")
+            full_text = res.body.decode("utf-8", errors="ignore")
     except Exception as e:
         ctx = e.args[0] if e.args else {}
         if isinstance(ctx, dict):
             body = ctx.get("body")
             if body:
-                page_text = str(body)
-    if not page_text:
+                full_text = str(body)
+    if not full_text:
         return None
-    # Narrow to the first <entry> so the judgment focuses on the paper metadata.
-    entry_pos = page_text.find("<entry>")
-    if entry_pos != -1:
-        page_text = page_text[entry_pos:]
-    return page_text[:6000]
+    # Budget is much larger than the old 6000-char abstract limit -- a paper's
+    # body genuinely needs it. Pragmatic trade-off against prompt size, not a
+    # precise "correct" number.
+    return full_text[:16000]
 
 
 def _parse_verdict(raw) -> dict:
-    """Defensively coerce an LLM response into a clamped verdict dict. Safe default
-    is 'inconclusive' -- never let malformed / surprising output move money."""
+    """Defensively coerce an LLM response into a clamped verdict dict. Safe
+    default is 'inconclusive' with is_duplicate=False -- never let malformed /
+    surprising output move money. If EITHER field is unparseable, the whole
+    verdict collapses to inconclusive rather than letting a half-parsed
+    is_duplicate interact unpredictably with a valid-looking verdict field --
+    one conservative default, not two independent ones that could combine in
+    a confusing way."""
     data = raw if isinstance(raw, dict) else {}
+
     verdict = str(data.get("verdict", "")).strip().lower()
-    if verdict not in VALID_VERDICTS:
+    is_dup_raw = data.get("is_duplicate", None)
+
+    verdict_ok = verdict in ("substantive", "frivolous", "inconclusive")
+    is_dup_ok = isinstance(is_dup_raw, bool)
+
+    if not verdict_ok or not is_dup_ok:
         verdict = "inconclusive"
+        is_duplicate = False
+    else:
+        is_duplicate = is_dup_raw
+
     reason = str(data.get("reason", ""))[:500]
-    return {"verdict": verdict, "reason": reason}
+    return {"verdict": verdict, "is_duplicate": is_duplicate, "reason": reason}
 
 
-def _judge_prompt(page_text: str, claim: str) -> str:
+def _judge_prompt(page_text: str, claim: str, prior_texts: list) -> str:
+    prior_block = "\n".join(f"- {t}" for t in prior_texts) if prior_texts else "(none yet)"
     return (
         "You are one of several independent expert reviewers judging whether a "
         "critique of a research paper identifies a REAL, substantive flaw.\n"
         "Base your judgment ONLY on the paper content provided below. Be strict "
         "and consistent so that independent reviewers converge on clear-cut cases.\n\n"
-        "=== PAPER (arXiv entry, may be truncated) ===\n"
+        "=== PAPER (full text, may be truncated) ===\n"
         f"{page_text}\n\n"
+        "=== CRITIQUES ALREADY REWARDED FOR THIS PAPER ===\n"
+        f"{prior_block}\n\n"
         "=== CRITIQUE UNDER REVIEW ===\n"
         f"{claim}\n\n"
-        "Decide exactly one verdict:\n"
+        "First: is this critique substantively the SAME underlying flaw as one "
+        "already rewarded above, even if reworded? Set is_duplicate accordingly.\n\n"
+        "Then decide exactly one verdict:\n"
         "- 'substantive': the critique identifies a genuine, material flaw or error "
         "supported by the paper's own content.\n"
         "- 'frivolous': the critique is wrong, trivial, off-topic, or unsupported "
         "by the paper.\n"
         "- 'inconclusive': the provided paper content is insufficient to judge.\n\n"
         'Respond ONLY as JSON: {"verdict": "substantive|frivolous|inconclusive", '
-        '"reason": "<=2 sentences citing the paper"}'
+        '"is_duplicate": true or false, "reason": "<=2 sentences citing the paper"}'
     )
 
 
@@ -165,6 +193,13 @@ class RigorBounty(gl.Contract):
 
     round_counter: u256                  # monotonic logical clock (see module header)
 
+    # FIX (issue 3): one entry per commit_critique call, in lockstep with
+    # round_counter -- entry at index i corresponds to round i+1, so a window
+    # of rounds maps directly to an index slice, no separate round->index
+    # lookup needed. Bounded by rounds elapsed since a specific commit, not an
+    # unbounded scan over full contract history.
+    round_committer_log: DynArray[str]   # JSON {"committer": "0x..."} per entry
+
     def __init__(self):
         self.admin = gl.message.sender_address
         self.protocol_fee_bps = u256(DEFAULT_FEE_BPS)
@@ -172,7 +207,7 @@ class RigorBounty(gl.Contract):
         self.paper_counter = u256(0)
         self.critique_counter = u256(0)
         self.round_counter = u256(0)
-        # TreeMap fields start empty; no initialization needed.
+        # TreeMap/DynArray fields start empty; no initialization needed.
 
     # --- internal guards / loaders ---------------------------------------------
 
@@ -189,6 +224,29 @@ class RigorBounty(gl.Contract):
         if critique_id not in self.critiques:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} unknown critique {critique_id}")
         return json.loads(self.critiques[critique_id])
+
+    def _distinct_committers_since(self, committed_at_round: int) -> int:
+        """FIX (issue 3): count distinct committing addresses in the round
+        range (committed_at_round, current]. Bounded by rounds elapsed since
+        THIS critique's commit -- not a scan over the whole contract."""
+        current = int(self.round_counter)
+        seen = set()
+        for i in range(committed_at_round, current):
+            entry = json.loads(self.round_committer_log[i])
+            seen.add(entry["committer"])
+        return len(seen)
+
+    def _check_fair_window(self, committed_at_round: int) -> None:
+        """Shared gate used by both resolve_critique and cancel_unrevealed --
+        one place to keep the two rules in sync."""
+        elapsed = int(self.round_counter) - committed_at_round
+        distinct = self._distinct_committers_since(committed_at_round)
+        if elapsed < MIN_WINDOW_ROUNDS or distinct < MIN_DISTINCT_COMMITTERS:
+            raise gl.vm.UserError(
+                f"{ERROR_EXPECTED} fair window not passed "
+                f"(rounds {elapsed}/{MIN_WINDOW_ROUNDS}, "
+                f"distinct committers {distinct}/{MIN_DISTINCT_COMMITTERS})"
+            )
 
     # --- admin ------------------------------------------------------------------
 
@@ -221,7 +279,10 @@ class RigorBounty(gl.Contract):
     def register_paper(self, title: str, arxiv_id: str) -> str:
         """Register a paper and seed its bounty pool with the attached value.
         `arxiv_id` is the bare arXiv identifier (e.g. '2401.12345' or '2401.12345v2');
-        we build the canonical export.arxiv.org API URL ourselves."""
+        we build the canonical arxiv.org full-text HTML URL ourselves. FIX (issue 1):
+        this now points at the full-text HTML endpoint, not the abstract-only API --
+        that's what resolve_critique actually fetches at judgment time, so the
+        stored URL matches reality."""
         value = int(gl.message.value)
         if value <= 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} register_paper needs a bounty (send value)")
@@ -236,7 +297,7 @@ class RigorBounty(gl.Contract):
             "sponsor": str(gl.message.sender_address),
             "title": title[:300],
             "arxiv_id": aid,
-            "arxiv_url": ARXIV_API + aid,
+            "arxiv_url": ARXIV_HTML_BASE + aid,
             "bounty_pool": str(value),
             "status": "active",
             "critique_count": 0,
@@ -265,7 +326,9 @@ class RigorBounty(gl.Contract):
         """Commit to a critique WITHOUT revealing it. The attached value is the
         hunter's stake (bond), at risk if the critique is frivolous or never
         revealed in time. Increments the logical round counter -- this is the ONLY
-        action that advances the fair-window clock."""
+        action that advances the fair-window clock. FIX (issue 3): also appends
+        to round_committer_log, in lockstep with round_counter, so the
+        distinct-committer gate has a real record to check against."""
         stake = int(gl.message.value)
         if stake <= 0:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} commit_critique needs a stake (send value)")
@@ -277,13 +340,15 @@ class RigorBounty(gl.Contract):
         if rec["status"] != "active":
             raise gl.vm.UserError(f"{ERROR_EXPECTED} paper {paper_id} is not active")
 
+        hunter = str(gl.message.sender_address)
+
         # Advance the logical clock FIRST so this commit also moves the window for
         # earlier critiques (activity-based ordering, not wall-clock duration).
         self.round_counter = u256(int(self.round_counter) + 1)
+        self.round_committer_log.append(json.dumps({"committer": hunter}))
         self.critique_counter = u256(int(self.critique_counter) + 1)
         cid = _critique_id(int(self.critique_counter))
 
-        hunter = str(gl.message.sender_address)
         crec = {
             "critique_id": cid,
             "paper_id": paper_id,
@@ -340,34 +405,47 @@ class RigorBounty(gl.Contract):
     @gl.public.write
     def resolve_critique(self, critique_id: str) -> str:
         """Fetch the live paper + judge the critique under CONSENSUS, then settle.
-        The verdict is decided INSIDE the nondet block and validated comparatively
-        (every validator re-fetches and re-judges) -- consensus is on the verdict
-        field itself, not just the shape of the leader's answer."""
+        FIX (issues 1 & 2): fetches full-text HTML (not the abstract) and, in the
+        SAME consensus round, also judges whether this critique duplicates an
+        already-rewarded one for this paper. Both decision fields are compared
+        by the validator -- real comparative validation on both, not a leader's
+        unchecked say-so on either."""
         crec = self._load_critique(critique_id)
         if crec["status"] != "revealed" or not crec["revealed"]:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} critique must be revealed to resolve")
 
-        # Fair-window gate (logical rounds, not time). Honest limitation: this is
-        # an ordering guarantee ("at least N commits happened since"), not a
-        # precise duration -- documented trade-off, see module header + sec.5.
-        elapsed = int(self.round_counter) - int(crec["committed_at_round"])
-        if elapsed < MIN_WINDOW_ROUNDS:
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} fair window not passed "
-                f"({elapsed}/{MIN_WINDOW_ROUNDS} rounds)"
-            )
+        # FIX (issue 3): fair-window gate now checks BOTH elapsed rounds and
+        # distinct committers. Honest limitation: this is an ordering/diversity
+        # guarantee, not a precise duration -- documented trade-off.
+        self._check_fair_window(int(crec["committed_at_round"]))
 
         # Pull everything the nondet closures need into LOCALS. The leader/validator
         # functions are serialized and run in sub-VMs; they must not touch `self`.
-        url = self._load_paper(crec["paper_id"])["arxiv_url"]
+        paper = self._load_paper(crec["paper_id"])
+        arxiv_id = paper["arxiv_id"]
         claim = crec["critique_text"]
 
+        # FIX (issue 2): gather prior REWARDED critique texts for this paper,
+        # bounded to the 5 most recent so the prompt stays a sane size.
+        prior_ids = json.loads(self.paper_critiques[crec["paper_id"]])
+        prior_substantive_texts = []
+        for pid in prior_ids:
+            if pid == critique_id:
+                continue
+            other = json.loads(self.critiques[pid])
+            if other["status"] == "substantive":
+                prior_substantive_texts.append(other["critique_text"][:800])
+        prior_substantive_texts = prior_substantive_texts[-5:]
+
         def leader_fn():
-            page = _fetch_paper_text(url)
+            page = _fetch_paper_text(arxiv_id)
             if not page:
                 # Evidence-bound: unreachable => inconclusive, never a default pass/fail.
-                return {"verdict": "inconclusive", "reason": "paper unreachable"}
-            raw = gl.nondet.exec_prompt(_judge_prompt(page, claim), response_format="json")
+                return {"verdict": "inconclusive", "is_duplicate": False, "reason": "paper unreachable"}
+            raw = gl.nondet.exec_prompt(
+                _judge_prompt(page, claim, prior_substantive_texts),
+                response_format="json",
+            )
             return _parse_verdict(raw)
 
         def validator_fn(leaders_res: gl.vm.Result) -> bool:
@@ -375,27 +453,44 @@ class RigorBounty(gl.Contract):
             if not isinstance(leaders_res, gl.vm.Return):
                 return _handle_leader_error(leaders_res, leader_fn)
             mine = leader_fn()
-            # Comparative consensus: agree only if the decisive field matches.
-            return leaders_res.calldata.get("verdict") == mine.get("verdict")
+            # Comparative consensus on BOTH decision fields -- this is what makes
+            # duplicate detection real validation instead of a leader's unchecked
+            # claim, same standard already applied to `verdict`.
+            return (
+                leaders_res.calldata.get("verdict") == mine.get("verdict")
+                and leaders_res.calldata.get("is_duplicate") == mine.get("is_duplicate")
+            )
 
         result = gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
         parsed = _parse_verdict(result)
-        self._apply_verdict(crec, parsed["verdict"], parsed["reason"])
+        self._apply_verdict(crec, parsed)
         return parsed["verdict"]
 
-    def _apply_verdict(self, crec: dict, verdict: str, reason: str) -> None:
+    def _apply_verdict(self, crec: dict, parsed: dict) -> None:
         """Deterministic settlement on the consensus verdict. Runs in the normal
         method body (post-consensus), so it may move money and write storage.
         Invariant: contract balance == sum(held stakes) + sum(bounty pools) +
         protocol_fees_collected. We only ever pay stake<=held and reward<=pool, so
-        the balance is always sufficient and pools can never be double-spent."""
+        the balance is always sufficient and pools can never be double-spent.
+
+        FIX (issue 2): is_duplicate takes PRIORITY over verdict -- a critique
+        judged both "substantive" and "is_duplicate" settles as duplicate, not
+        substantive, since paying it would recreate the exact repeat-award
+        exploit being fixed here. Stake returned in full, no reward, no pool
+        change -- documented design choice (see VALID_VERDICTS comment)."""
         hunter = crec["hunter"]
         stake = int(crec["stake"])
+        verdict = parsed["verdict"]
+        is_duplicate = parsed["is_duplicate"]
+        reason = parsed["reason"]
+
+        effective_status = "duplicate" if (is_duplicate and verdict == "substantive") else verdict
+
         paper = self._load_paper(crec["paper_id"])
         pool = int(paper["bounty_pool"])
         reward_paid = 0
 
-        if verdict == "substantive":
+        if effective_status == "substantive":
             # Reward = share of the CURRENT pool (early strong critiques earn more;
             # never over-drains). Protocol fee taken from the gross reward.
             gross = pool * REWARD_BPS_OF_POOL // BPS_DENOM
@@ -406,16 +501,20 @@ class RigorBounty(gl.Contract):
             reward_paid = net
             _pay(hunter, stake)   # return the bond
             _pay(hunter, net)     # pay the reward
-        elif verdict == "frivolous":
+        elif effective_status == "frivolous":
             # Stake is forfeited to the protocol; the pool is untouched.
             self.protocol_fees_collected = u256(int(self.protocol_fees_collected) + stake)
+        elif effective_status == "duplicate":
+            # Correctly identified but not a fresh finding -- stake returned,
+            # nothing else moves.
+            _pay(hunter, stake)
         else:  # inconclusive
             # No judgeable evidence -> return the stake in full, move nothing else.
             _pay(hunter, stake)
 
         self.papers[crec["paper_id"]] = json.dumps(paper)
-        crec["status"] = verdict
-        crec["verdict"] = verdict
+        crec["status"] = effective_status
+        crec["verdict"] = effective_status
         crec["verdict_detail"] = reason
         crec["reward_paid"] = str(reward_paid)
         crec["resolved_round"] = int(self.round_counter)
@@ -425,15 +524,13 @@ class RigorBounty(gl.Contract):
     def cancel_unrevealed(self, critique_id: str) -> None:
         """Once the fair window has passed with no reveal, anyone can unblock the
         critique. The stake is returned IN FULL -- a timeout is not proof of bad
-        faith, and punishing it would deter honest hunters who hit a real snag."""
+        faith, and punishing it would deter honest hunters who hit a real snag.
+        FIX (issue 3): now uses the same shared _check_fair_window as resolve, so
+        the two never drift out of sync."""
         crec = self._load_critique(critique_id)
         if crec["status"] != "committed" or crec["revealed"]:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} critique is not an unrevealed commit")
-        elapsed = int(self.round_counter) - int(crec["committed_at_round"])
-        if elapsed < MIN_WINDOW_ROUNDS:
-            raise gl.vm.UserError(
-                f"{ERROR_EXPECTED} window not passed ({elapsed}/{MIN_WINDOW_ROUNDS})"
-            )
+        self._check_fair_window(int(crec["committed_at_round"]))
         crec["status"] = "expired"
         self.critiques[critique_id] = json.dumps(crec)
         _pay(crec["hunter"], int(crec["stake"]))
@@ -451,6 +548,15 @@ class RigorBounty(gl.Contract):
     @gl.public.view
     def get_round_counter(self) -> u256:
         return self.round_counter
+
+    @gl.public.view
+    def get_distinct_committers_since(self, committed_at_round: int) -> u256:
+        """FIX (steward feedback, issue 3): lets the frontend honestly display
+        progress toward the second fair-window gate, not just the round count.
+        Read-only wrapper around the same helper resolve_critique/
+        cancel_unrevealed enforce -- one source of truth, no risk of the
+        displayed number drifting from the enforced one."""
+        return u256(self._distinct_committers_since(committed_at_round))
 
     @gl.public.view
     def get_paper(self, paper_id: str) -> str:
@@ -476,6 +582,7 @@ class RigorBounty(gl.Contract):
             "protocol_fees_collected": str(int(self.protocol_fees_collected)),
             "round_counter": int(self.round_counter),
             "min_window_rounds": MIN_WINDOW_ROUNDS,
+            "min_distinct_committers": MIN_DISTINCT_COMMITTERS,
             "reward_bps_of_pool": REWARD_BPS_OF_POOL,
             "max_fee_bps": MAX_FEE_BPS,
         })
