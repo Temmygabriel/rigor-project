@@ -37,22 +37,20 @@ export function CritiqueItem({
   const [fromDraft, setFromDraft] = useState(false);
   const busy = !!step;
 
-  // FIX (steward feedback, issue 3): the real, enforced number, not a guess --
-  // read straight from the contract's own get_distinct_committers_since, the
-  // same helper resolve_critique/cancel_unrevealed check against internally.
+  // FIX (steward rejection, issue 3): pass paper_id so the contract's
+  // cross-paper filter is applied — same-paper commits are excluded, matching
+  // exactly what resolve_critique and cancel_unrevealed enforce on-chain.
   const [distinctCommitters, setDistinctCommitters] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
-    getDistinctCommittersSince(critique.committed_at_round).then((n) => {
+    getDistinctCommittersSince(critique.committed_at_round, critique.paper_id).then((n) => {
       if (!cancelled) setDistinctCommitters(n);
     });
     return () => {
       cancelled = true;
     };
-    // Re-check whenever the round counter moves, since that's what changes it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [critique.committed_at_round, roundCounter]);
+  }, [critique.committed_at_round, critique.paper_id, roundCounter]);
 
   const isMine =
     !!identity &&
@@ -62,9 +60,6 @@ export function CritiqueItem({
   const roundsPassed = roundsElapsed >= MIN_WINDOW_ROUNDS;
   const roundsLeft = Math.max(0, MIN_WINDOW_ROUNDS - roundsElapsed);
   const distinctPassed = distinctCommitters !== null && distinctCommitters >= MIN_DISTINCT_COMMITTERS;
-  // Only claim the window has passed once we actually know the distinct count --
-  // showing "resolvable" based on rounds alone would be misleading now that
-  // there's a second real gate.
   const windowPassed = roundsPassed && distinctPassed;
 
   const meta = STATUS_META[critique.status];
@@ -77,7 +72,6 @@ export function CritiqueItem({
     }
   })();
 
-  // Pull the reveal secret from this browser's saved drafts, if present.
   const draft = useMemo(() => {
     if (!identity) return undefined;
     return findDraftForCritique(
@@ -93,7 +87,6 @@ export function CritiqueItem({
       setRevealSalt(draft.salt);
       setFromDraft(true);
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
   async function doReveal() {
@@ -133,7 +126,6 @@ export function CritiqueItem({
       onRefresh();
     } catch (e) {
       setStep(null);
-      // resolve is a long consensus job; a timeout doesn't mean failure
       setError(friendlyError(e));
     }
   }
@@ -178,12 +170,10 @@ export function CritiqueItem({
         )}
       </div>
 
-      {/* Revealed / resolved text */}
       {critique.revealed && critique.critique_text && (
         <blockquote className="crit-text">{critique.critique_text}</blockquote>
       )}
 
-      {/* Verdict detail after resolution */}
       {isResolved && (
         <div
           className={`notice notice-${
@@ -200,9 +190,6 @@ export function CritiqueItem({
         </div>
       )}
 
-      {/* --- actions ------------------------------------------------------- */}
-
-      {/* Committed, not yet revealed */}
       {critique.status === "committed" && !critique.revealed && (
         <div className="crit-actions">
           {isMine && (
@@ -284,14 +271,12 @@ export function CritiqueItem({
         </div>
       )}
 
-      {/* Revealed, awaiting/eligible for judgment */}
       {critique.status === "revealed" && (
         <div className="crit-actions">
           {windowPassed ? (
             <div className="stack">
               <div className="hint">
-                Response window elapsed. Anyone can trigger validator judgment — validators
-                independently fetch the paper and reach consensus.
+                Response window elapsed. Anyone can trigger validator judgment.
               </div>
               <div className="btn-row">
                 <button className="btn btn-red" onClick={doResolve} disabled={busy}>
@@ -307,10 +292,10 @@ export function CritiqueItem({
               {distinctCommitters === null
                 ? "checking distinct committers…"
                 : distinctPassed
-                ? "✓ enough distinct committers"
-                : `${distinctCommitters}/${MIN_DISTINCT_COMMITTERS} distinct hunters committed since`}
-              . Each new commitment on any paper advances the clock; only DISTINCT addresses
-              count toward the second condition.
+                ? "✓ enough distinct cross-paper committers"
+                : `${distinctCommitters}/${MIN_DISTINCT_COMMITTERS} distinct addresses committed to other papers since then`}
+              . Commits to this same paper do not count — only activity on
+              other papers advances this gate.
             </div>
           )}
         </div>
