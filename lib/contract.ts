@@ -55,14 +55,16 @@ export async function getRoundCounter(): Promise<number> {
   }
 }
 
-// FIX (steward feedback, issue 3): exposes the second fair-window gate so the
-// UI can honestly show progress toward it, not just the round count. Wraps
-// the same helper the contract itself enforces in resolve_critique /
-// cancel_unrevealed -- one source of truth, no risk of drifting from what's
-// actually enforced on-chain.
-export async function getDistinctCommittersSince(committedAtRound: number): Promise<number> {
+// FIX (steward rejection, issue 3): paper_id is now required so the contract
+// can exclude same-paper commits from the count. Passing only committedAtRound
+// would return an over-counted number that doesn't match what the contract
+// actually enforces in resolve_critique / cancel_unrevealed.
+export async function getDistinctCommittersSince(
+  committedAtRound: number,
+  paperId: string
+): Promise<number> {
   try {
-    return Number(await read("get_distinct_committers_since", [committedAtRound]));
+    return Number(await read("get_distinct_committers_since", [committedAtRound, paperId]));
   } catch {
     return 0;
   }
@@ -107,7 +109,7 @@ export async function listPapers(): Promise<PaperRecord[]> {
   if (n <= 0) return [];
   const ids = Array.from({ length: n }, (_, i) => padId("PAP", i + 1));
   const papers = await Promise.all(ids.map((id) => getPaper(id)));
-  return papers.filter((p): p is PaperRecord => !!p).reverse(); // newest first
+  return papers.filter((p): p is PaperRecord => !!p).reverse();
 }
 
 export async function listCritiquesForPaper(paperId: string): Promise<CritiqueRecord[]> {
@@ -118,8 +120,6 @@ export async function listCritiquesForPaper(paperId: string): Promise<CritiqueRe
 
 // --- low-level writes -------------------------------------------------------
 
-// Never send an explicit value:0 on a payable call — GenLayer's RPC rejects it
-// ("Invalid parameters"). Only attach `value` when it is strictly positive.
 async function sendWrite(
   account: GenAccount,
   functionName: string,
@@ -146,10 +146,6 @@ async function waitReceipt(
 }
 
 // --- flows ------------------------------------------------------------------
-// We deliberately do NOT simulate payable writes (confirmed unreliable for
-// honoring `value`) and we never trust a simulated return value. For methods
-// that mint an id, we read the relevant counter/feed and derive the id from
-// on-chain state after the tx finalizes.
 
 export interface RegisterResult {
   txHash: `0x${string}`;
@@ -170,7 +166,6 @@ export async function registerPaper(
   onStep?.("Waiting for the network to finalize…");
   await waitReceipt(txHash, 100, 5000);
 
-  // derive the new paper id from state (don't trust a returned value)
   onStep?.("Reading back your new paper…");
   let counter = before;
   for (let i = 0; i < 10 && counter <= before; i++) {
@@ -223,7 +218,6 @@ export async function commitCritique(
   onStep?.("Waiting for the network to finalize…");
   await waitReceipt(txHash, 100, 5000);
 
-  // find our just-committed critique by matching the commit hash on the feed
   onStep?.("Locating your commitment on-chain…");
   let critiqueId: string | null = null;
   for (let i = 0; i < 8 && !critiqueId; i++) {
@@ -261,12 +255,10 @@ export async function resolveCritique(
 ): Promise<`0x${string}`> {
   onStep?.("Requesting validator judgment…");
   const txHash = await sendWrite(account, "resolve_critique", [critiqueId]);
-  // resolve runs a live web fetch + LLM judgment + consensus across validators.
-  // On studionet this legitimately takes several minutes — poll patiently.
   onStep?.(
     "Validators are independently fetching the paper and judging. This can take several minutes…"
   );
-  await waitReceipt(txHash, 150, 5000); // ~12.5 min ceiling
+  await waitReceipt(txHash, 150, 5000);
   return txHash;
 }
 
