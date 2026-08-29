@@ -10,7 +10,7 @@ import {
   listCritiquesForPaper,
 } from "@/lib/contract";
 import type { CritiqueRecord, PaperRecord } from "@/lib/types";
-import { ARXIV_ABS } from "@/lib/config";
+import { ARXIV_ABS, MIN_WINDOW_ROUNDS, MIN_DISTINCT_COMMITTERS } from "@/lib/config";
 import { genToWei, shortAddr, weiToGen } from "@/lib/format";
 import { friendlyError } from "@/lib/errors";
 import { CommitForm } from "@/components/CommitForm";
@@ -27,7 +27,6 @@ export default function PaperDetailPage({ params }: { params: { id: string } }) 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
-  // fund control
   const [fundAmt, setFundAmt] = useState("");
   const [fundStep, setFundStep] = useState<string | null>(null);
   const [fundError, setFundError] = useState<string | null>(null);
@@ -193,7 +192,8 @@ export default function PaperDetailPage({ params }: { params: { id: string } }) 
         <h2 style={{ marginBottom: 6 }}>Submit a sealed critique</h2>
         <p className="muted" style={{ marginBottom: 16, maxWidth: 640 }}>
           Stake a bond and commit the hash of your critique. You'll reveal the text after the
-          response window, and validators will judge it against the live paper.
+          response window, and validators will judge it against the live paper — checking both
+          whether it's substantive and whether it repeats a critique already rewarded here.
         </p>
         <div className="card">
           <CommitForm paperId={paper.paper_id} paperTitle={paper.title} onDone={load} />
@@ -214,9 +214,16 @@ export default function PaperDetailPage({ params }: { params: { id: string } }) 
           </button>
         </div>
 
+        {/* Both gates enforced on-chain: elapsed rounds, AND enough distinct
+            addresses that (a) committed to a DIFFERENT paper since this
+            critique's own commit, and (b) posted a meaningful stake to do so —
+            a dust-stake commit on a throwaway paper does not count. */}
         <p className="micro muted" style={{ margin: "6px 0 16px" }}>
-          Current commit-round: {roundCounter}. A critique becomes resolvable once enough rounds
-          elapse after its commit.
+          Current commit-round: {roundCounter}. A critique becomes resolvable once at least{" "}
+          {MIN_WINDOW_ROUNDS} rounds have elapsed since its commit AND at least{" "}
+          {MIN_DISTINCT_COMMITTERS} distinct addresses have committed a meaningfully-staked
+          critique to a <em>different</em> paper since then — this keeps one address (or a
+          throwaway second paper) from rushing its own window with dust-stake commits.
         </p>
 
         {loadError && <div className="notice notice-red" style={{ marginBottom: 14 }}>{loadError}</div>}
