@@ -37,9 +37,10 @@ export function CritiqueItem({
   const [fromDraft, setFromDraft] = useState(false);
   const busy = !!step;
 
-  // FIX (steward rejection, issue 3): pass paper_id so the contract's
-  // cross-paper filter is applied — same-paper commits are excluded, matching
-  // exactly what resolve_critique and cancel_unrevealed enforce on-chain.
+  // Reads the same stake-floor-filtered, cross-paper-filtered count the
+  // contract itself enforces in resolve_critique / cancel_unrevealed — one
+  // source of truth, no risk of the displayed number drifting from what's
+  // actually enforced on-chain.
   const [distinctCommitters, setDistinctCommitters] = useState<number | null>(null);
 
   useEffect(() => {
@@ -87,6 +88,7 @@ export function CritiqueItem({
       setRevealSalt(draft.salt);
       setFromDraft(true);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
   async function doReveal() {
@@ -276,7 +278,8 @@ export function CritiqueItem({
           {windowPassed ? (
             <div className="stack">
               <div className="hint">
-                Response window elapsed. Anyone can trigger validator judgment.
+                Response window elapsed. Anyone can trigger validator judgment — validators
+                independently fetch the paper and reach consensus.
               </div>
               <div className="btn-row">
                 <button className="btn btn-red" onClick={doResolve} disabled={busy}>
@@ -292,10 +295,10 @@ export function CritiqueItem({
               {distinctCommitters === null
                 ? "checking distinct committers…"
                 : distinctPassed
-                ? "✓ enough distinct cross-paper committers"
-                : `${distinctCommitters}/${MIN_DISTINCT_COMMITTERS} distinct addresses committed to other papers since then`}
-              . Commits to this same paper do not count — only activity on
-              other papers advances this gate.
+                ? "✓ enough qualifying committers"
+                : `${distinctCommitters}/${MIN_DISTINCT_COMMITTERS} distinct addresses committed a meaningfully-staked critique to another paper since then`}
+              . Only commits to a <em>different</em> paper, above the minimum stake,
+              count — a dust-stake commit or a same-paper commit does not advance this gate.
             </div>
           )}
         </div>
