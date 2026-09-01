@@ -2,16 +2,23 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useIdentity } from "@/app/providers";
+import { deriveAddressFromPk } from "@/lib/identity";
 import { shortAddr } from "@/lib/format";
 
 export function IdentityBadge() {
-  const { identity, ready, reset } = useIdentity();
+  const { identity, ready, reset, importIdentity } = useIdentity();
   const [open, setOpen] = useState(false);
   const [showKey, setShowKey] = useState(false);
   const [copiedAddr, setCopiedAddr] = useState(false);
   const [copiedKey, setCopiedKey] = useState(false);
   const [mmAddress, setMmAddress] = useState<string | null>(null);
   const [mmError, setMmError] = useState<string | null>(null);
+  // import-from-private-key form state
+  const [importOpen, setImportOpen] = useState(false);
+  const [importPk, setImportPk] = useState("");
+  const [importPreview, setImportPreview] = useState<string | null>(null);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importedMsg, setImportedMsg] = useState<string | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
 
   // Reset ephemeral state every time the menu closes
@@ -21,6 +28,11 @@ export function IdentityBadge() {
       setCopiedAddr(false);
       setCopiedKey(false);
       setMmError(null);
+      setImportOpen(false);
+      setImportPk("");
+      setImportPreview(null);
+      setImportError(null);
+      setImportedMsg(null);
     }
   }, [open]);
 
@@ -60,6 +72,61 @@ export function IdentityBadge() {
       setter(true);
       setTimeout(() => setter(false), 1800);
     });
+  }
+
+  // Live-validate the pasted key and preview the address it would recover.
+  function onImportPkChange(value: string) {
+    setImportPk(value);
+    setImportedMsg(null);
+    const trimmed = value.trim();
+    if (!trimmed) {
+      setImportPreview(null);
+      setImportError(null);
+      return;
+    }
+    const preview = deriveAddressFromPk(value);
+    setImportPreview(preview);
+    setImportError(
+      preview ? null : "Invalid private key — expected 64 hex characters, optionally 0x-prefixed."
+    );
+  }
+
+  function closeImportForm() {
+    setImportOpen(false);
+    setImportPk("");
+    setImportPreview(null);
+    setImportError(null);
+  }
+
+  function onImportConfirm() {
+    if (!identity || !importPreview) return;
+    // Same key is already active — just persist and acknowledge, no churn.
+    if (importPreview === identity.address) {
+      const result = importIdentity(importPk);
+      if ("error" in result) {
+        setImportError(result.error);
+        return;
+      }
+      setImportedMsg("That key is already your active identity — nothing changed.");
+      closeImportForm();
+      return;
+    }
+    if (
+      !window.confirm(
+        `Recover this wallet in this browser?\n\nSigning address will change from ${shortAddr(
+          identity.address
+        )} to ${shortAddr(importPreview)}.`
+      )
+    ) {
+      return;
+    }
+    const result = importIdentity(importPk);
+    if ("error" in result) {
+      setImportError(result.error);
+      return;
+    }
+    setImportedMsg(`Wallet recovered — signing as ${shortAddr(result.identity.address)}.`);
+    closeImportForm();
   }
 
   if (!ready || !identity) {
@@ -222,6 +289,92 @@ export function IdentityBadge() {
                 }}>
                   Stored only in this browser. Clearing site data or switching devices loses it permanently — save it somewhere if you have a funded balance.
                 </div>
+              </div>
+            )}
+          </div>
+
+          <hr className="hr" style={{ margin: 0 }} />
+
+          {/* recover wallet from private key section */}
+          <div>
+            <div style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10,
+              letterSpacing: "0.12em",
+              textTransform: "uppercase",
+              color: "var(--ink-faint)",
+              marginBottom: 8,
+            }}>
+              Recover wallet
+            </div>
+            {!importOpen ? (
+              <button
+                className="btn btn-ghost"
+                style={{ fontSize: 12, width: "100%" }}
+                onClick={() => setImportOpen(true)}
+              >
+                Import from private key
+              </button>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                <input
+                  type="password"
+                  placeholder="Paste 0x + 64 hex chars"
+                  value={importPk}
+                  onChange={(e) => onImportPkChange(e.target.value)}
+                  spellCheck={false}
+                  autoComplete="off"
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    background: "var(--well)",
+                    border: `1px solid ${importError ? "var(--red)" : "var(--rule-strong)"}`,
+                    borderRadius: 4,
+                    padding: "8px 10px",
+                    color: "var(--ink)",
+                    outline: "none",
+                  }}
+                />
+                {importError ? (
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--red)" }}>
+                    {importError}
+                  </div>
+                ) : importPreview ? (
+                  <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-faint)" }}>
+                    Recovers:{" "}
+                    <span style={{ color: "var(--ink)" }}>
+                      {importPreview === identity.address
+                        ? "your current address"
+                        : shortAddr(importPreview)}
+                    </span>
+                  </div>
+                ) : null}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button
+                    className="btn"
+                    style={{ fontSize: 12, flex: 1 }}
+                    disabled={!importPreview}
+                    onClick={onImportConfirm}
+                  >
+                    Recover
+                  </button>
+                  <button
+                    className="btn btn-ghost"
+                    style={{ fontSize: 12 }}
+                    onClick={closeImportForm}
+                  >
+                    Cancel
+                  </button>
+                </div>
+                <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--ink-faint)" }}>
+                  Paste a private key you saved earlier — the same wallet (address + signer) comes
+                  back in this browser.
+                </div>
+              </div>
+            )}
+            {importedMsg && (
+              <div style={{ fontFamily: "var(--font-mono)", fontSize: 11, color: "var(--green)", marginTop: 8 }}>
+                {importedMsg}
               </div>
             )}
           </div>
