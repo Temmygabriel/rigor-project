@@ -48,6 +48,38 @@ def _commit_hash(critique_text: str, salt: str) -> str:
     return hashlib.sha256((critique_text + salt).encode("utf-8")).hexdigest()
 
 
+def _extract_abstract(html: str) -> str:
+    """Pull the <div class="ltx_abstract">...</div> block (the paper abstract).
+
+    arXiv HTML renders the abstract inside a div with class ltx_abstract. We
+    slice it out by tag depth (string ops only — deterministic for validators,
+    no regex, no new imports) so it can be kept even when a page is too big to
+    send whole. Returns "" when not found."""
+    i = html.find('class="ltx_abstract"')
+    if i < 0:
+        i = html.find("class='ltx_abstract'")
+    if i < 0:
+        return ""
+    div = html.rfind("<div", 0, i)
+    if div < 0:
+        return ""
+    depth = 0
+    j = div
+    while True:
+        open_pos = html.find("<div", j)
+        close_pos = html.find("</div>", j)
+        if open_pos != -1 and (close_pos == -1 or open_pos < close_pos):
+            depth += 1
+            j = open_pos + 4
+        elif close_pos != -1:
+            depth -= 1
+            j = close_pos + 6
+            if depth == 0:
+                return html[div:j]
+        else:
+            return ""
+
+
 def _fetch_paper_text(arxiv_id: str):
     full_text = None
     try:
@@ -64,7 +96,21 @@ def _fetch_paper_text(arxiv_id: str):
         return None
     if len(full_text) <= 40000:
         return full_text
-    return full_text[:30000] + "\n\n[... middle section omitted ...]\n\n" + full_text[-10000:]
+    # Large page: keep the head + tail windows as before, but ALWAYS include
+    # the abstract. On real papers the abstract (where many critiques anchor)
+    # can sit past the head cut, so a naive head/tail slice silently drops it
+    # and the judge sees only TOC + bibliography -> false "inconclusive".
+    # See RESOLVE-CRITIQUE-INVESTIGATION.md.
+    abstract = _extract_abstract(full_text)
+    head = full_text[:30000]
+    tail = full_text[-10000:]
+    parts = []
+    if abstract:
+        parts.append(abstract)
+    parts.append(head)
+    parts.append("\n\n[... middle section omitted ...]\n\n")
+    parts.append(tail)
+    return "".join(parts)
 
 
 def _parse_verdict(raw) -> dict:
