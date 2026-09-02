@@ -24,6 +24,9 @@ MIN_DISTINCT_COMMITTERS = 5
 MIN_QUORUM_STAKE_WEI_DEFAULT = 10**18  # 1 GEN by default; admin can retune
 
 REWARD_BPS_OF_POOL = 5000
+# Reward is capped (see _apply_verdict/_window_locked_stakes): a winning
+# critique pays at most the total stake OTHER wallets parked to open its
+# fair window, so manufacturing a gate can never be profitable.
 DEFAULT_FEE_BPS = 250
 MAX_FEE_BPS = 2000
 BPS_DENOM = 10000
@@ -240,6 +243,24 @@ class RigorBounty(gl.Contract):
             seen.add(entry["committer"])
         return len(seen)
 
+    def _window_locked_stakes(self, committed_at_round: int, paper_id: str) -> int:
+        """Total GEN parked by qualifying cross-paper committers in a critique's
+        fair window -- the base for the reward cap (see _apply_verdict). Uses the
+        same filter as _distinct_committers_since (different paper, stake >=
+        min_quorum_stake) and does NOT count the resolving critique's own stake,
+        so a hunter cannot inflate the cap by over-staking their own critique."""
+        current = int(self.round_counter)
+        total = 0
+        threshold = int(self.min_quorum_stake)
+        for i in range(committed_at_round, current):
+            entry = json.loads(self.round_committer_log[i])
+            if entry.get("paper_id") == paper_id:
+                continue
+            if int(entry.get("stake", 0)) < threshold:
+                continue
+            total += int(entry.get("stake", 0))
+        return total
+
     def _check_fair_window(self, committed_at_round: int, paper_id: str) -> None:
         elapsed = int(self.round_counter) - committed_at_round
         distinct = self._distinct_committers_since(committed_at_round, paper_id)
@@ -451,6 +472,14 @@ class RigorBounty(gl.Contract):
 
         if effective_status == "substantive":
             gross = pool * REWARD_BPS_OF_POOL // BPS_DENOM
+            # Reward cap (anti-farm): a winning critique never pays out more than
+            # the total stake OTHER wallets parked to open its fair window.
+            # Manufacturing a gate with confederate wallets is therefore never
+            # profitable -- the best a forced resolve can do is pay back (part of)
+            # the capital that was locked to force it. The cap applies to GROSS,
+            # so the uncapped remainder stays in the bounty pool untouched.
+            cap = self._window_locked_stakes(int(crec["committed_at_round"]), crec["paper_id"])
+            gross = min(gross, cap)
             fee = gross * int(self.protocol_fee_bps) // BPS_DENOM
             net = gross - fee
             paper["bounty_pool"] = str(pool - gross)
@@ -498,6 +527,12 @@ class RigorBounty(gl.Contract):
     @gl.public.view
     def get_distinct_committers_since(self, committed_at_round: int, paper_id: str) -> u256:
         return u256(self._distinct_committers_since(committed_at_round, paper_id))
+
+    @gl.public.view
+    def get_window_locked_stakes(self, committed_at_round: int, paper_id: str) -> u256:
+        """Read the current reward cap for a critique (committed_at_round +
+        paper_id from get_critique). Lets anyone audit the cap before resolving."""
+        return u256(self._window_locked_stakes(committed_at_round, paper_id))
 
     @gl.public.view
     def get_paper(self, paper_id: str) -> str:
