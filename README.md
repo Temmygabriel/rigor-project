@@ -27,7 +27,7 @@ One environment variable, read at build time:
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `NEXT_PUBLIC_CONTRACT_ADDRESS` | Address of the deployed `RigorBounty` contract on studionet | `0xa12c93B846A8525B00CF7fa812880541A1FA1d3f` |
+| `NEXT_PUBLIC_CONTRACT_ADDRESS` | Address of the deployed `RigorBounty` contract on studionet | `0x4d00fDBaA7b0f54A79b1ac7c40bF68c2d886528a` |
 
 The default points at the live Studio-deployed contract, so the app runs even if the variable is unset. Override it to point at your own deployment (see the contract deploy steps in the repo root).
 

@@ -19,6 +19,7 @@ export function CommitForm({
 }) {
   const { identity, ready } = useIdentity();
   const [text, setText] = useState("");
+  const [quote, setQuote] = useState("");
   const [stake, setStake] = useState("");
   const [step, setStep] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -35,6 +36,11 @@ export function CommitForm({
     const body = text.trim();
     if (body.length < 12) {
       setError("Write a substantive critique first — at least a full sentence describing the flaw.");
+      return;
+    }
+    const quoted = quote.trim();
+    if (quoted && (quoted.length < 12 || quoted.length > 600)) {
+      setError("The quoted passage should be 12–600 characters — a sentence or two, copied verbatim.");
       return;
     }
     let stakeWei: bigint;
@@ -59,6 +65,7 @@ export function CommitForm({
         paperTitle,
         critiqueId: null,
         text: body,
+        quote: quote.trim(),
         salt,
         commitHash: hash,
         stakeWei: stakeWei.toString(),
@@ -78,6 +85,7 @@ export function CommitForm({
         `Committed${critiqueId ? ` as ${critiqueId}` : ""}. Only the hash is public — your text stays sealed in this browser until you reveal it after the response window opens.`
       );
       setText("");
+      setQuote("");
       setStake("");
       onDone();
     } catch (e) {
@@ -103,6 +111,24 @@ export function CommitForm({
         <div className="hint">
           Committed as <span className="mono">sha256(text + secret salt)</span>. The salt is
           generated and stored locally for you — nothing about the text is on-chain until you reveal.
+        </div>
+      </div>
+
+      <div className="field" style={{ margin: 0 }}>
+        <label className="label" htmlFor="quote">
+          Quoted passage <span className="muted">(needed for long papers)</span>
+        </label>
+        <textarea
+          id="quote"
+          className="textarea"
+          placeholder="Paste the exact sentence(s) from the paper that you're criticizing, word for word. Long papers can't be sent to the validators whole — they're shown the window around this quote, so the flaw you found has to be inside it."
+          value={quote}
+          onChange={(e) => setQuote(e.target.value)}
+          disabled={busy}
+        />
+        <div className="hint">
+          Copy it verbatim from the paper — no paraphrasing, no equations or table cells. Leave
+          blank for short papers; validators get the whole paper then.
         </div>
       </div>
 

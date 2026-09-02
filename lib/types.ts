@@ -31,6 +31,7 @@ export interface CritiqueRecord {
   hunter: string;
   commit_hash: string;
   critique_text: string; // "" until revealed
+  quote: string; // "" unless the hunter quoted a verbatim passage (big papers)
   committed_at_round: number;
   revealed: boolean;
   stake: string; // wei decimal string
@@ -65,6 +66,7 @@ export interface CommitDraft {
   paperTitle: string;
   critiqueId: string | null; // filled once we resolve it from chain
   text: string;
+  quote: string; // verbatim passage the critique targets (may be "")
   salt: string;
   commitHash: string;
   stakeWei: string;

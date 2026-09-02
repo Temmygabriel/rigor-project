@@ -33,6 +33,7 @@ export function CritiqueItem({
   const [success, setSuccess] = useState<string | null>(null);
   const [showReveal, setShowReveal] = useState(false);
   const [revealText, setRevealText] = useState("");
+  const [revealQuote, setRevealQuote] = useState("");
   const [revealSalt, setRevealSalt] = useState("");
   const [fromDraft, setFromDraft] = useState(false);
   const busy = !!step;
@@ -83,8 +84,9 @@ export function CritiqueItem({
   }, [identity, critique.paper_id, critique.commit_hash]);
 
   useEffect(() => {
-    if (draft && !revealText && !revealSalt) {
+    if (draft && !revealText && !revealQuote && !revealSalt) {
       setRevealText(draft.text);
+      setRevealQuote(draft.quote || "");
       setRevealSalt(draft.salt);
       setFromDraft(true);
     }
@@ -104,6 +106,7 @@ export function CritiqueItem({
         identity.account,
         critique.critique_id,
         revealText,
+        revealQuote.trim(),
         revealSalt.trim(),
         setStep
       );
@@ -176,6 +179,13 @@ export function CritiqueItem({
         <blockquote className="crit-text">{critique.critique_text}</blockquote>
       )}
 
+      {critique.revealed && critique.quote && (
+        <div className="quote-anchor">
+          <span className="k">quoted passage</span>
+          <blockquote className="crit-quote">{critique.quote}</blockquote>
+        </div>
+      )}
+
       {isResolved && (
         <div
           className={`notice notice-${
@@ -225,6 +235,25 @@ export function CritiqueItem({
                       }}
                       disabled={busy}
                     />
+                  </div>
+                  <div className="field" style={{ margin: 0 }}>
+                    <label className="label">
+                      Quoted passage <span className="muted">(if you quoted one)</span>
+                    </label>
+                    <textarea
+                      className="textarea"
+                      placeholder="Paste the same verbatim quote you committed with. Validators of long papers are shown the window around this passage — it must match what you committed."
+                      value={revealQuote}
+                      onChange={(e) => {
+                        setRevealQuote(e.target.value);
+                        setFromDraft(false);
+                      }}
+                      disabled={busy}
+                    />
+                    <div className="hint">
+                      Leave blank if you committed without a quote (short papers). If you did quote,
+                      it must be the exact passage — byte for byte.
+                    </div>
                   </div>
                   <div className="field" style={{ margin: 0 }}>
                     <label className="label">Salt</label>

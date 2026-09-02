@@ -238,11 +238,12 @@ export async function revealCritique(
   account: GenAccount,
   critiqueId: string,
   text: string,
+  quote: string,
   salt: string,
   onStep?: OnStep
 ): Promise<`0x${string}`> {
   onStep?.("Revealing critique text…");
-  const txHash = await sendWrite(account, "reveal_critique", [critiqueId, text, salt]);
+  const txHash = await sendWrite(account, "reveal_critique", [critiqueId, text, salt, quote]);
   onStep?.("Waiting for the network to finalize…");
   await waitReceipt(txHash, 100, 5000);
   return txHash;
