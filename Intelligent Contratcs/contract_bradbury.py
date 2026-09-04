@@ -344,9 +344,23 @@ def _handle_leader_error(leaders_res, leader_fn) -> bool:
         return False
 
 
+@gl.evm.contract_interface
+class _EOA:
+    class View:
+        pass
+
+    class Write:
+        pass
+
+
 def _pay(to_hex: str, amount: int) -> None:
     if amount > 0:
-        gl.get_contract_at(Address(to_hex)).emit_transfer(value=u256(amount), on="finalized")
+        # External message (EthSend, empty calldata) to a plain wallet/EOA on the
+        # chain layer. gl.get_contract_at(...).emit_transfer is an INTERNAL IC->IC
+        # message: when the destination has no deployed IC (every Rigor payee is an
+        # EOA) its child tx finalizes with a GenVM Execution ERROR, the value is
+        # debited from this contract, and the recipient is never credited.
+        _EOA(Address(to_hex)).emit_transfer(value=u256(amount))
 
 
 class RigorBounty(gl.Contract):

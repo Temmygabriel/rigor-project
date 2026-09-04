@@ -1,5 +1,5 @@
 export const CONTRACT_ADDRESS = (process.env.NEXT_PUBLIC_CONTRACT_ADDRESS ||
-  "0x4d00fDBaA7b0f54A79b1ac7c40bF68c2d886528a") as `0x${string}`;
+  "0x649713d4F896453667133252f680560ecdD75D88") as `0x${string}`;
 
 export const EXPLORER_BASE = "https://genlayer-explorer.vercel.app";
 
